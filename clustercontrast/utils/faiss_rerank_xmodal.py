@@ -26,6 +26,25 @@ def k_reciprocal_neigh(initial_rank, i, k1):
     return forward_k_neigh_index[fi]
 
 
+def reciprocal_modal_lqe_neighbors(rank1, rank2, query_index, modal_k2, rgb_num):
+    """Select balanced LQE neighbors supported in both ranking directions."""
+    reverse_rank = rank1 if query_index < rgb_num else rank2
+
+    def reciprocal_or_fallback(candidates):
+        reciprocal = [
+            candidate for candidate in candidates
+            if query_index in reverse_rank[candidate, :modal_k2]
+        ]
+        return np.asarray(reciprocal if reciprocal else candidates)
+
+    vis_candidates = rank1[query_index, :modal_k2]
+    ir_candidates = rank2[query_index, :modal_k2]
+    return (
+        reciprocal_or_fallback(vis_candidates),
+        reciprocal_or_fallback(ir_candidates),
+    )
+
+
 def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=True, search_option=0, use_float16=False, all_file_name=None, rgbNum=0):
     end = time.time()
     if print_flag:
@@ -105,8 +124,13 @@ def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=Tru
         for i in range(N):
             #V_qe[i,:] = np.mean(V[initial_rank[i,:k2],:], axis=0)
             if search_option >= 4:
-                vis_mean = np.mean(V[rank1[i,:k2],:], axis=0)
-                ir_mean = np.mean(V[rank2[i,:k2],:], axis=0)
+                if k2 % 2 != 0:
+                    raise ValueError("modality-balanced query expansion requires an even k2")
+                modal_k2 = k2 // 2
+                vis_neighbors, ir_neighbors = reciprocal_modal_lqe_neighbors(
+                    rank1, rank2, i, modal_k2, rgbNum)
+                vis_mean = np.mean(V[vis_neighbors, :], axis=0)
+                ir_mean = np.mean(V[ir_neighbors, :], axis=0)
                 V_qe[i, :] = np.mean([vis_mean, ir_mean], axis=0)
             else:
                 feas_NIR_temp, feas_VIS_temp = [], []
