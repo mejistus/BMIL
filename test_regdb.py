@@ -289,7 +289,8 @@ def main_worker(args):
     all_cmc_v2, all_mAP_v2, all_mINP_v2 = 0, 0, 0
     cnt = 0
 
-    for trial in range(1, 11):  #(1,11):
+    trials = [args.trial] if args.trial is not None else range(1, 11)
+    for trial in trials:
         args.test_batch=64
         args.img_w=args.width
         args.img_h=args.height
@@ -325,7 +326,7 @@ def main_worker(args):
         # fc feature
         distmat = np.matmul(query_feat_fc, np.transpose(gall_feat_fc))
         cmc, mAP, mINP = eval_regdb(-distmat, query_label, gall_label)
-        if trial == 1:
+        if cnt == 0:
             all_cmc = cmc
             all_mAP = mAP
             all_mINP = mINP
@@ -359,7 +360,7 @@ def main_worker(args):
         # fc feature
         distmat = np.matmul(query_feat_fc, np.transpose(gall_feat_fc))
         cmc, mAP, mINP = eval_regdb(-distmat, query_label, gall_label)
-        if trial == 1:
+        if trial == trials[0]:
             all_cmc_v2 = cmc
             all_mAP_v2 = mAP
             all_mINP_v2 = mINP
@@ -434,6 +435,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--print-freq', type=int, default=10)
     parser.add_argument('--eval-step', type=int, default=1)
+    parser.add_argument('--trial', type=int, choices=range(1, 11),
+                        help='evaluate one RegDB trial instead of all ten')
     parser.add_argument('--temp', type=float, default=0.05,
                         help="temperature for scaling contrastive loss")
     # path
