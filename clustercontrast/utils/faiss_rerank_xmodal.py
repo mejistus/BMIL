@@ -105,8 +105,11 @@ def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=Tru
         for i in range(N):
             #V_qe[i,:] = np.mean(V[initial_rank[i,:k2],:], axis=0)
             if search_option >= 4:
-                vis_mean = np.mean(V[rank1[i,:k2],:], axis=0)
-                ir_mean = np.mean(V[rank2[i,:k2],:], axis=0)
+                if k2 % 2 != 0:
+                    raise ValueError("modality-balanced query expansion requires an even k2")
+                modal_k2 = k2 // 2
+                vis_mean = np.mean(V[rank1[i, :modal_k2], :], axis=0)
+                ir_mean = np.mean(V[rank2[i, :modal_k2], :], axis=0)
                 V_qe[i, :] = np.mean([vis_mean, ir_mean], axis=0)
             else:
                 feas_NIR_temp, feas_VIS_temp = [], []
