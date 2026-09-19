@@ -19,6 +19,26 @@ import torch.nn.functional as F
 from .faiss_utils import search_index_pytorch, search_raw_array_pytorch, index_init_gpu, index_init_cpu
 
 
+def select_local_boundary(similarities, min_k=3, max_k=6, threshold=2.5):
+    """Choose a stable local cut after rank k, or fall back to max_k."""
+    values = np.asarray(similarities, dtype=np.float64)
+    if values.ndim != 1 or len(values) < max_k + 1:
+        raise ValueError("similarities must contain at least max_k + 1 ranks")
+    if min_k < 1 or min_k > max_k:
+        raise ValueError("expected 1 <= min_k <= max_k")
+
+    gaps = values[:max_k] - values[1:max_k + 1]
+    reference = gaps[min_k - 1:max_k]
+    median = np.median(reference)
+    mad = np.median(np.abs(reference - median))
+    scale = 1.4826 * mad + 1e-12
+    robust_scores = (reference - median) / scale
+    best_offset = int(np.argmax(robust_scores))
+    if robust_scores[best_offset] < threshold:
+        return max_k
+    return min_k + best_offset
+
+
 def k_reciprocal_neigh(initial_rank, i, k1):
     forward_k_neigh_index = initial_rank[i,:k1+1]
     backward_k_neigh_index = initial_rank[forward_k_neigh_index,:k1+1]
@@ -102,11 +122,17 @@ def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=Tru
 
     if k2 != 1:
         V_qe = np.zeros_like(V, dtype=mat_type)
+        selected_vis_k = []
+        selected_ir_k = []
         for i in range(N):
             #V_qe[i,:] = np.mean(V[initial_rank[i,:k2],:], axis=0)
             if search_option >= 4:
-                vis_mean = np.mean(V[rank1[i,:k2],:], axis=0)
-                ir_mean = np.mean(V[rank2[i,:k2],:], axis=0)
+                vis_k = select_local_boundary(sim1[i].cpu().numpy(), max_k=k2)
+                ir_k = select_local_boundary(sim2[i].cpu().numpy(), max_k=k2)
+                selected_vis_k.append(vis_k)
+                selected_ir_k.append(ir_k)
+                vis_mean = np.mean(V[rank1[i,:vis_k],:], axis=0)
+                ir_mean = np.mean(V[rank2[i,:ir_k],:], axis=0)
                 V_qe[i, :] = np.mean([vis_mean, ir_mean], axis=0)
             else:
                 feas_NIR_temp, feas_VIS_temp = [], []
@@ -128,6 +154,15 @@ def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=Tru
                     V_qe[i, :] = np.mean([NIR_embed_mean, VIS_embed_mean], axis=0)
         V = V_qe
         del V_qe
+        if print_flag and search_option >= 4:
+            print(
+                "Local boundary LQE: visible mean {:.2f}, infrared mean {:.2f}, "
+                "fallback rates {:.2%}/{:.2%}".format(
+                    np.mean(selected_vis_k), np.mean(selected_ir_k),
+                    np.mean(np.asarray(selected_vis_k) == k2),
+                    np.mean(np.asarray(selected_ir_k) == k2),
+                )
+            )
 
     del initial_rank
 
