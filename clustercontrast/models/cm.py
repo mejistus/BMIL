@@ -1,4 +1,5 @@
 import collections
+import math
 import numpy as np
 from abc import ABC
 import torch
@@ -132,20 +133,53 @@ class ClusterMemory(nn.Module, ABC):
 
 
     def get_multi_pos_loss(self, score, batch_proxy_ind):
-        assert(self.proxy_pseudo_labels is not None)
-        temp_score = score.detach().clone()
+        assert self.proxy_pseudo_labels is not None
+        identity_score, proxy_counts = self._identity_balanced_logits(score)
+        target_identity = self.proxy_pseudo_labels[batch_proxy_ind]
+        num_identities = identity_score.size(1)
         bg_knn = 50
-        loss = 0
-        for i in range(len(score)):
-            pseudo_lbl = self.proxy_pseudo_labels[batch_proxy_ind[i]]
-            pos_ind = torch.nonzero(self.proxy_pseudo_labels == pseudo_lbl).squeeze(-1)
-            assert(len(pos_ind)>=1 and len(pos_ind)<3)
-            temp_score[i, pos_ind] = 10000
-            _, sel_ind = torch.topk(temp_score[i], k=bg_knn)
-            sel_score = score[i, sel_ind]
-            sel_target = torch.zeros(sel_score.shape, dtype=sel_score.dtype).cuda()
-            sel_target[0:len(pos_ind)] = 1.0/len(pos_ind)
-            loss += -1.0 * (F.log_softmax(sel_score.unsqueeze(0), dim=1) * sel_target.unsqueeze(0)).sum()
-        loss /= len(score)
 
-        return loss
+        if num_identities == 1:
+            return identity_score.sum() * 0.0
+
+        positive_score = identity_score.gather(1, target_identity.unsqueeze(1))
+        negative_score = identity_score.clone()
+        negative_score.scatter_(1, target_identity.unsqueeze(1), float('-inf'))
+        negative_count = min(bg_knn - 1, num_identities - 1)
+        hard_negative_score = torch.topk(
+            negative_score, k=negative_count, dim=1
+        ).values
+        selected_score = torch.cat([positive_score, hard_negative_score], dim=1)
+        targets = torch.zeros(
+            selected_score.size(0), dtype=torch.long, device=selected_score.device
+        )
+
+        return F.cross_entropy(selected_score, targets)
+
+    def _identity_balanced_logits(self, score):
+        """Collapse one or two modality proxies into one equal-mass identity logit."""
+        proxy_labels = self.proxy_pseudo_labels
+        unique_labels, proxy_counts = torch.unique_consecutive(
+            proxy_labels, return_counts=True
+        )
+        expected_labels = torch.arange(
+            len(unique_labels), dtype=unique_labels.dtype, device=unique_labels.device
+        )
+        if not torch.equal(unique_labels, expected_labels):
+            raise ValueError("proxy pseudo labels must be contiguous and identity-sorted")
+        if torch.any((proxy_counts < 1) | (proxy_counts > 2)):
+            raise ValueError("each identity must have one or two modality proxies")
+
+        starts = torch.cumsum(proxy_counts, dim=0) - proxy_counts
+        identity_score = score[:, starts].clone()
+        dual_proxy = proxy_counts == 2
+        if torch.any(dual_proxy):
+            dual_starts = starts[dual_proxy]
+            dual_scores = torch.stack(
+                [score[:, dual_starts], score[:, dual_starts + 1]], dim=0
+            )
+            identity_score[:, dual_proxy] = (
+                torch.logsumexp(dual_scores, dim=0) - math.log(2.0)
+            )
+
+        return identity_score, proxy_counts
