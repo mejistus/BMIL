@@ -19,6 +19,24 @@ import torch.nn.functional as F
 from .faiss_utils import search_index_pytorch, search_raw_array_pytorch, index_init_gpu, index_init_cpu
 
 
+def compute_hubness(rank, candidate_count, k):
+    neighbors = np.asarray(rank[:, :k], dtype=np.int64).reshape(-1)
+    occurrences = np.bincount(neighbors, minlength=candidate_count).astype(np.float64)
+    mean = occurrences.mean()
+    std = occurrences.std()
+    skewness = 0.0 if std == 0 else np.mean(((occurrences - mean) / std) ** 3)
+    top_count = max(1, int(np.ceil(0.01 * candidate_count)))
+    top_mass = np.sort(occurrences)[-top_count:].sum() / max(occurrences.sum(), 1.0)
+    return occurrences, float(skewness), float(top_mass)
+
+
+def hubness_weighted_mean(values, neighbor_indices, occurrences, alpha=0.5):
+    indices = np.asarray(neighbor_indices, dtype=np.int64)
+    weights = np.power(occurrences[indices] + 1.0, -alpha)
+    weights /= weights.sum()
+    return np.sum(values[indices, :] * weights[:, None], axis=0)
+
+
 def k_reciprocal_neigh(initial_rank, i, k1):
     forward_k_neigh_index = initial_rank[i,:k1+1]
     backward_k_neigh_index = initial_rank[forward_k_neigh_index,:k1+1]
@@ -102,11 +120,33 @@ def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=Tru
 
     if k2 != 1:
         V_qe = np.zeros_like(V, dtype=mat_type)
+        if search_option >= 4:
+            rank1_np = rank1.cpu().numpy()
+            rank2_np = rank2.cpu().numpy() - rgbNum
+            vis_hubness, vis_skew, vis_top_mass = compute_hubness(
+                rank1_np, rgbNum, k2
+            )
+            ir_hubness, ir_skew, ir_top_mass = compute_hubness(
+                rank2_np, N - rgbNum, k2
+            )
+            if print_flag:
+                print(
+                    "Hubness LQE: skew visible/infrared {:.3f}/{:.3f}, "
+                    "top-1% edge mass {:.2%}/{:.2%}".format(
+                        vis_skew, ir_skew, vis_top_mass, ir_top_mass
+                    )
+                )
         for i in range(N):
             #V_qe[i,:] = np.mean(V[initial_rank[i,:k2],:], axis=0)
             if search_option >= 4:
-                vis_mean = np.mean(V[rank1[i,:k2],:], axis=0)
-                ir_mean = np.mean(V[rank2[i,:k2],:], axis=0)
+                vis_indices = rank1_np[i, :k2]
+                ir_indices_local = rank2_np[i, :k2]
+                vis_mean = hubness_weighted_mean(
+                    V, vis_indices, vis_hubness
+                )
+                ir_mean = hubness_weighted_mean(
+                    V, ir_indices_local + rgbNum, ir_hubness
+                )
                 V_qe[i, :] = np.mean([vis_mean, ir_mean], axis=0)
             else:
                 feas_NIR_temp, feas_VIS_temp = [], []
