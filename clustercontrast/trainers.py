@@ -8,6 +8,39 @@ import math
 import numpy as np
 
 
+def clone_gradients(parameters):
+    return [
+        None if parameter.grad is None else parameter.grad.detach().clone()
+        for parameter in parameters
+    ]
+
+
+def project_conflicting_gradients(parameters, reference_gradients, eps=1e-12):
+    pairs = [
+        (parameter.grad, reference)
+        for parameter, reference in zip(parameters, reference_gradients)
+        if parameter.grad is not None and reference is not None
+    ]
+    if not pairs:
+        return 0.0, False
+
+    dot = sum(torch.sum(current * reference) for current, reference in pairs)
+    current_norm_sq = sum(torch.sum(current * current) for current, _ in pairs)
+    reference_norm_sq = sum(
+        torch.sum(reference * reference) for _, reference in pairs
+    )
+    cosine = dot / torch.sqrt(
+        torch.clamp(current_norm_sq * reference_norm_sq, min=eps)
+    )
+    conflicting = dot.item() < 0.0
+    if conflicting:
+        coefficient = dot / torch.clamp(reference_norm_sq, min=eps)
+        for current, reference in pairs:
+            current.sub_(coefficient * reference)
+
+    return cosine.item(), conflicting
+
+
 
 class ClusterContrastTrainer_Stage1(object):
     def __init__(self, encoder, memory=None):
@@ -87,6 +120,9 @@ class ClusterContrastTrainer_Stage2(object):
         self.memory_ir = memory
         self.memory_rgb = memory
         self.memory_all = memory
+        self.gradient_cosine_sum = 0.0
+        self.gradient_measurements = 0
+        self.gradient_conflicts = 0
 
     def train(self, epoch, data_loader_ir, data_loader_rgb, data_loader_all_ir, data_loader_all_rgb,
               optimizer, print_freq=10, train_iters=200, has_global_cluster_loss=True):
@@ -121,6 +157,11 @@ class ClusterContrastTrainer_Stage2(object):
 
             optimizer.zero_grad()
             loss.backward()
+            parameters = [
+                parameter for parameter in self.encoder.parameters()
+                if parameter.requires_grad
+            ]
+            intra_gradients = clone_gradients(parameters)
             optimizer.step()
 
             losses.update(loss.item())
@@ -149,6 +190,12 @@ class ClusterContrastTrainer_Stage2(object):
             
                 optimizer.zero_grad()
                 loss2.backward()
+                gradient_cosine, conflicting = project_conflicting_gradients(
+                    parameters, intra_gradients
+                )
+                self.gradient_cosine_sum += gradient_cosine
+                self.gradient_measurements += 1
+                self.gradient_conflicts += int(conflicting)
                 optimizer.step()
             # ----------------------------------------------------------------------------
 
@@ -164,10 +211,14 @@ class ClusterContrastTrainer_Stage2(object):
                       'Loss ir {:.3f}\t'
                       'Loss rgb {:.3f}\t'
                       'Loss global {:.3f}\t'
+                      'Grad cosine {:.3f}\t'
+                      'Conflict rate {:.2%}\t'
                       .format(epoch, i + 1, len(data_loader_rgb),
                               batch_time.val, batch_time.avg,
                               data_time.val, data_time.avg,
-                              losses.val, losses.avg, loss_ir, loss_rgb, loss2))
+                              losses.val, losses.avg, loss_ir, loss_rgb, loss2,
+                              self.gradient_cosine_sum / self.gradient_measurements,
+                              self.gradient_conflicts / self.gradient_measurements))
 
 
     def _parse_data_rgb(self, inputs):
@@ -183,7 +234,6 @@ class ClusterContrastTrainer_Stage2(object):
 
     def _forward(self, x1, x2, label_1=None, label_2=None, modal=0):
         return self.encoder(x1, x2, modal=modal, label_1=label_1, label_2=label_2)
-
 
 
 
