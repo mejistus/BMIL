@@ -30,9 +30,14 @@ def compute_hubness(rank, candidate_count, k):
     return occurrences, float(skewness), float(top_mass)
 
 
-def hubness_weighted_mean(values, neighbor_indices, occurrences, alpha=0.5):
+def hubness_weighted_mean(
+        values, neighbor_indices, occurrences, alpha=0.5, occurrence_offset=0):
     indices = np.asarray(neighbor_indices, dtype=np.int64)
-    weights = np.power(occurrences[indices] + 1.0, -alpha)
+    occurrence_indices = indices - occurrence_offset
+    if np.any(occurrence_indices < 0) or np.any(
+            occurrence_indices >= len(occurrences)):
+        raise IndexError("neighbor index is outside the modality occurrence range")
+    weights = np.power(occurrences[occurrence_indices] + 1.0, -alpha)
     weights /= weights.sum()
     return np.sum(values[indices, :] * weights[:, None], axis=0)
 
@@ -145,7 +150,8 @@ def compute_jaccard_distance_xmodal(target_features, k1=20, k2=6, print_flag=Tru
                     V, vis_indices, vis_hubness
                 )
                 ir_mean = hubness_weighted_mean(
-                    V, ir_indices_local + rgbNum, ir_hubness
+                    V, ir_indices_local + rgbNum, ir_hubness,
+                    occurrence_offset=rgbNum
                 )
                 V_qe[i, :] = np.mean([vis_mean, ir_mean], axis=0)
             else:

@@ -25,6 +25,21 @@ class HubnessLQETest(unittest.TestCase):
         self.assertLess(weighted[0], 0.5)
         self.assertGreater(weighted[1], 0.5)
 
+    def test_modality_offset_keeps_value_and_occurrence_indices_separate(self):
+        values = np.array([
+            [9.0, 9.0],
+            [8.0, 8.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ])
+        occurrences = np.array([9.0, 1.0])
+        weighted = hubness_weighted_mean(
+            values, [2, 3], occurrences, occurrence_offset=2
+        )
+
+        self.assertLess(weighted[0], 0.5)
+        self.assertGreater(weighted[1], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()
