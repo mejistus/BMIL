@@ -1,7 +1,32 @@
 import torch
 import torch.nn as nn
 from torch.nn import init
+from torch.nn import functional as F
 from .resnet_agw import resnet50 as resnet50_agw
+
+
+def complementary_block_masks(spatial, num_pairs, block_size):
+    batch, _, height, width = spatial.shape
+    if height % block_size != 0 or width % block_size != 0:
+        raise ValueError(
+            "CMCRA block size must divide the spatial feature dimensions"
+        )
+
+    grid_h = height // block_size
+    grid_w = width // block_size
+    grid_cells = grid_h * grid_w
+    if grid_cells % 2 != 0:
+        raise ValueError("CMCRA requires an even number of spatial blocks")
+
+    scores = torch.rand(batch, num_pairs, grid_cells, device=spatial.device)
+    selected = scores.topk(grid_cells // 2, dim=-1).indices
+    coarse = spatial.new_zeros(batch, num_pairs, grid_cells)
+    coarse.scatter_(-1, selected, 1.0)
+    coarse = coarse.view(batch, num_pairs, grid_h, grid_w)
+    coarse = coarse.repeat_interleave(block_size, dim=2)
+    coarse = coarse.repeat_interleave(block_size, dim=3)
+    masks = torch.stack((coarse, 1.0 - coarse), dim=2)
+    return masks.view(batch, 2 * num_pairs, 1, height, width)
 
 class Normalize(nn.Module):
     def __init__(self, power=2):
@@ -180,7 +205,31 @@ class embed_net_ori(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.gm_pool = gm_pool
 
-    def forward(self, x1, x2, modal=0,label_1=None,label_2=None):
+    @torch.no_grad()
+    def _masked_spatial_embeddings(self, spatial, num_pairs, block_size):
+        """Pool complementary fixed-area block masks without changing BN state."""
+        batch, channels, height, width = spatial.shape
+        masks = complementary_block_masks(spatial, num_pairs, block_size)
+
+        powered = spatial.detach().unsqueeze(1).pow(3.0)
+        denominator = masks.sum(dim=(3, 4)).clamp_min(1.0)
+        pooled = (powered.mul(masks).sum(dim=(3, 4)) / denominator + 1e-12).pow(1.0 / 3.0)
+        pooled = pooled.view(-1, channels)
+        embedded = F.batch_norm(
+            pooled,
+            self.bottleneck.running_mean,
+            self.bottleneck.running_var,
+            self.bottleneck.weight,
+            self.bottleneck.bias,
+            training=False,
+            momentum=0.0,
+            eps=self.bottleneck.eps,
+        )
+        embedded = self.l2norm(embedded)
+        return embedded.view(batch, 2 * num_pairs, channels)
+
+    def forward(self, x1, x2, modal=0,label_1=None,label_2=None,
+                return_masked=False, mask_pairs=3, mask_block_size=3):
         # print(x1,x2)
         single_size = x1.size(0)
         if modal == 0:
@@ -232,6 +281,7 @@ class embed_net_ori(nn.Module):
                     NL4_counter += 1
         else:
             x = self.base_resnet(x)
+        spatial = x
         if self.gm_pool == 'on':
             b, c, h, w = x.shape
             x = x.view(b, c, -1)
@@ -244,6 +294,13 @@ class embed_net_ori(nn.Module):
         feat = self.bottleneck(x_pool)
 
         if self.training:
+            if return_masked:
+                masked = self._masked_spatial_embeddings(
+                    spatial, mask_pairs, mask_block_size
+                )
+                return (feat, feat[:single_size], feat[single_size:], label_1,
+                        label_2, x_pool[:single_size], x_pool[single_size:],
+                        masked[:single_size], masked[single_size:])
             return feat,feat[:single_size],feat[single_size:],label_1,label_2,x_pool[:single_size],x_pool[single_size:] 
         else:
             return self.l2norm(feat) 

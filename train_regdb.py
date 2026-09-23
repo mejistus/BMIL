@@ -631,7 +631,15 @@ def main_worker_stage2(args, log_s1_name, log_s2_name, save_name=''):
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=0.1)
 
     # Trainer
-    trainer = ClusterContrastTrainer_Stage2(model)
+    trainer = ClusterContrastTrainer_Stage2(
+        model,
+        cmcra=getattr(args, 'cmcra', False),
+        cmcra_mask_pairs=getattr(args, 'cmcra_mask_pairs', 3),
+        cmcra_mask_block_size=getattr(args, 'cmcra_mask_block_size', 3),
+        cmcra_scale=getattr(args, 'cmcra_scale', 0.1),
+        cmcra_min_weight=getattr(args, 'cmcra_min_weight', 0.05),
+        cmcra_target_momentum=getattr(args, 'cmcra_target_momentum', 0.9),
+    )
 
     for epoch in range(args.epochs):
         with torch.no_grad():
@@ -673,6 +681,8 @@ def main_worker_stage2(args, log_s1_name, log_s2_name, save_name=''):
             if args.use_global_clustering:
                 all_ir_fnames = [f for f, _, _ in sorted(dataset_ir.train)]
                 all_rgb_fnames = [f for f, _, _ in sorted(dataset_rgb.train)]
+                trainer.update_cmcra_target_bank(all_rgb_fnames, features_rgb)
+                trainer.update_cmcra_target_bank(all_ir_fnames, features_ir)
                 
                 feature_all = torch.cat([features_rgb, features_ir], dim=0)
                 all_fnames = all_rgb_fnames + all_ir_fnames
@@ -950,5 +960,12 @@ if __name__ == '__main__':
     # new params
     parser.add_argument('--save_log_name', type=str, default='train_')
     parser.add_argument('--use_global_clustering',  action="store_true")
+    parser.add_argument('--cmcra', action="store_true",
+                        help='audit opposite-modality positives with complementary masks')
+    parser.add_argument('--cmcra-mask-pairs', type=int, default=3)
+    parser.add_argument('--cmcra-mask-block-size', type=int, default=3)
+    parser.add_argument('--cmcra-scale', type=float, default=0.1)
+    parser.add_argument('--cmcra-min-weight', type=float, default=0.05)
+    parser.add_argument('--cmcra-target-momentum', type=float, default=0.9)
 
     main()
