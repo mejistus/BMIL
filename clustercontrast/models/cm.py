@@ -131,51 +131,43 @@ def weighted_multi_positive_loss(score, batch_proxy_ind, proxy_labels,
     A unit gate is exactly the released BMIL objective. A zero gate removes the
     opposite-modality positive from both the target and the normalizer.
     """
-    total_loss = score.new_zeros(())
-    for row in range(len(score)):
-        pseudo_label = proxy_labels[batch_proxy_ind[row]]
-        positive_indices = torch.nonzero(
-            proxy_labels == pseudo_label
-        ).squeeze(-1)
-        if not 1 <= len(positive_indices) < 3:
-            raise AssertionError("BMIL expects one or two modality proxies")
+    positive_mask = (
+        proxy_labels[batch_proxy_ind].unsqueeze(1)
+        == proxy_labels.unsqueeze(0)
+    )
+    ranking_score = score.detach().masked_fill(positive_mask, 10000)
+    selected_indices = torch.topk(
+        ranking_score, k=min(bg_knn, score.size(1)), dim=1
+    ).indices
+    selected_score = score.gather(1, selected_indices)
+    selected_positive = positive_mask.gather(1, selected_indices)
+    selected_own = selected_indices == batch_proxy_ind.unsqueeze(1)
+    selected_opposite = selected_positive & ~selected_own
 
-        ranking_score = score[row].detach().clone()
-        ranking_score[positive_indices] = 10000
-        selected_indices = torch.topk(
-            ranking_score, k=min(bg_knn, score.size(1))
-        ).indices
-        selected_score = score[row, selected_indices]
-
-        selected_positive = (
-            selected_indices.unsqueeze(1) == positive_indices.unsqueeze(0)
-        ).any(dim=1)
-        selected_own = selected_indices == batch_proxy_ind[row]
-        selected_opposite = selected_positive & ~selected_own
-
-        positive_weights = selected_score.new_zeros(selected_score.shape)
-        positive_weights[selected_own] = 1.0
-        denominator_score = selected_score.clone()
-        if selected_opposite.any():
-            relation_weight = (
-                selected_score.new_tensor(1.0)
-                if relation_weights is None
-                else relation_weights[row].to(selected_score)
-            )
-            positive_weights[selected_opposite] = relation_weight
-            log_weight = torch.where(
-                relation_weight > 0,
-                relation_weight.log(),
-                relation_weight.new_tensor(float("-inf")),
-            )
-            denominator_score[selected_opposite] += log_weight
-
-        target_score = (
-            selected_score * positive_weights
-        ).sum() / positive_weights.sum()
-        total_loss += torch.logsumexp(denominator_score, dim=0) - target_score
-
-    return total_loss / len(score)
+    if relation_weights is None:
+        relation_weights = score.new_ones(score.size(0))
+    else:
+        relation_weights = relation_weights.to(score)
+    positive_weights = (
+        selected_own.to(score.dtype)
+        + selected_opposite.to(score.dtype) * relation_weights.unsqueeze(1)
+    )
+    log_weights = torch.where(
+        relation_weights > 0,
+        relation_weights.log(),
+        relation_weights.new_full(relation_weights.shape, float("-inf")),
+    )
+    denominator_score = selected_score + torch.where(
+        selected_opposite,
+        log_weights.unsqueeze(1),
+        torch.zeros_like(selected_score),
+    )
+    target_score = (
+        selected_score * positive_weights
+    ).sum(dim=1) / positive_weights.sum(dim=1)
+    return (
+        torch.logsumexp(denominator_score, dim=1) - target_score
+    ).mean()
 
 
 
@@ -238,12 +230,12 @@ class ClusterMemory(nn.Module, ABC):
                     )
                     valid_weights = relation_weights[valid]
                     valid_instability = instability[valid]
-                    self.last_cmcra_stats = {
-                        "count": int(valid.sum().item()),
-                        "weight_sum": float(valid_weights.sum().item()),
-                        "instability_sum": float(valid_instability.sum().item()),
-                        "below_half": int((valid_weights < 0.5).sum().item()),
-                    }
+                    self.last_cmcra_stats = torch.stack((
+                        valid.sum().to(valid_weights.dtype),
+                        valid_weights.sum(),
+                        valid_instability.sum(),
+                        (valid_weights < 0.5).sum().to(valid_weights.dtype),
+                    )).detach()
                 loss = 0.5 * (
                     self.get_multi_pos_loss(hard, targets, relation_weights)
                     + self.get_multi_pos_loss(mean, targets, relation_weights)

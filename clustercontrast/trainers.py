@@ -130,10 +130,7 @@ class ClusterContrastTrainer_Stage2(object):
         data_time = AverageMeter()
 
         losses = AverageMeter()
-        cmcra_count = 0
-        cmcra_weight_sum = 0.0
-        cmcra_instability_sum = 0.0
-        cmcra_below_half = 0
+        cmcra_stats_total = None
 
         end = time.time()
         for i in range(train_iters):
@@ -223,10 +220,11 @@ class ClusterContrastTrainer_Stage2(object):
                     for stats in (stats_ir, stats_rgb):
                         if stats is None:
                             continue
-                        cmcra_count += stats["count"]
-                        cmcra_weight_sum += stats["weight_sum"]
-                        cmcra_instability_sum += stats["instability_sum"]
-                        cmcra_below_half += stats["below_half"]
+                        cmcra_stats_total = (
+                            stats.clone()
+                            if cmcra_stats_total is None
+                            else cmcra_stats_total + stats
+                        )
                 else:
                     # indexes here are modality-specific proxy indices
                     loss_all_ir = self.memory_all(f_out_all_ir, indexes_all_ir)
@@ -256,7 +254,13 @@ class ClusterContrastTrainer_Stage2(object):
                               batch_time.val, batch_time.avg,
                               data_time.val, data_time.avg,
                               losses.val, losses.avg, loss_ir, loss_rgb, loss2))
-                if self.cmcra and cmcra_count:
+                if self.cmcra and cmcra_stats_total is not None:
+                    (cmcra_count, cmcra_weight_sum,
+                     cmcra_instability_sum, cmcra_below_half) = (
+                        cmcra_stats_total.cpu().tolist()
+                    )
+                    if cmcra_count == 0:
+                        continue
                     print(
                         'CMCRA: relations {} | mean weight {:.4f} | '
                         'mean instability {:.4f} | weight<0.5 {:.2%}'.format(
@@ -285,8 +289,6 @@ class ClusterContrastTrainer_Stage2(object):
             x1, x2, modal=modal, label_1=label_1, label_2=label_2,
             **kwargs
         )
-
-
 
 
 
